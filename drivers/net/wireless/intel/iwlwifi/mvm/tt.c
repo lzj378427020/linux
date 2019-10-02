@@ -5,7 +5,7 @@
  *
  * GPL LICENSE SUMMARY
  *
- * Copyright(c) 2013 - 2014 Intel Corporation. All rights reserved.
+ * Copyright(c) 2013 - 2014, 2019 Intel Corporation. All rights reserved.
  * Copyright(c) 2013 - 2014 Intel Mobile Communications GmbH
  * Copyright(c) 2015 - 2016 Intel Deutschland GmbH
  *
@@ -18,11 +18,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110,
- * USA
- *
  * The full GNU General Public License is included in this distribution
  * in the file called COPYING.
  *
@@ -32,7 +27,7 @@
  *
  * BSD LICENSE
  *
- * Copyright(c) 2012 - 2014 Intel Corporation. All rights reserved.
+ * Copyright(c) 2012 - 2014, 2019 Intel Corporation. All rights reserved.
  * Copyright(c) 2013 - 2014 Intel Mobile Communications GmbH
  * Copyright(c) 2015 - 2016 Intel Deutschland GmbH
  * All rights reserved.
@@ -71,7 +66,7 @@
 
 #define IWL_MVM_TEMP_NOTIF_WAIT_TIMEOUT	HZ
 
-static void iwl_mvm_enter_ctkill(struct iwl_mvm *mvm)
+void iwl_mvm_enter_ctkill(struct iwl_mvm *mvm)
 {
 	struct iwl_mvm_tt_mgmt *tt = &mvm->thermal_throttle;
 	u32 duration = tt->params.ct_kill_duration;
@@ -303,15 +298,7 @@ static void check_exit_ctkill(struct work_struct *work)
 	if (__iwl_mvm_mac_start(mvm))
 		goto reschedule;
 
-	/* make sure the device is available for direct read/writes */
-	if (iwl_mvm_ref_sync(mvm, IWL_MVM_REF_CHECK_CTKILL)) {
-		__iwl_mvm_mac_stop(mvm);
-		goto reschedule;
-	}
-
 	ret = iwl_mvm_get_temp(mvm, &temp);
-
-	iwl_mvm_unref(mvm, IWL_MVM_REF_CHECK_CTKILL);
 
 	__iwl_mvm_mac_stop(mvm);
 
@@ -356,7 +343,7 @@ static void iwl_mvm_tt_tx_protection(struct iwl_mvm *mvm, bool enable)
 	struct iwl_mvm_sta *mvmsta;
 	int i, err;
 
-	for (i = 0; i < IWL_MVM_STATION_COUNT; i++) {
+	for (i = 0; i < ARRAY_SIZE(mvm->fw_id_to_mac_id); i++) {
 		mvmsta = iwl_mvm_sta_from_staid_protected(mvm, i);
 		if (!mvmsta)
 			continue;
@@ -529,6 +516,7 @@ int iwl_mvm_ctdp_command(struct iwl_mvm *mvm, u32 op, u32 state)
 
 	lockdep_assert_held(&mvm->mutex);
 
+	status = 0;
 	ret = iwl_mvm_send_cmd_pdu_status(mvm, WIDE_ID(PHY_OPS_GROUP,
 						       CTDP_CONFIG_CMD),
 					  sizeof(cmd), &cmd, &status);
@@ -567,16 +555,19 @@ static int compare_temps(const void *a, const void *b)
 	return ((s16)le16_to_cpu(*(__le16 *)a) -
 		(s16)le16_to_cpu(*(__le16 *)b));
 }
+#endif
 
 int iwl_mvm_send_temp_report_ths_cmd(struct iwl_mvm *mvm)
 {
 	struct temp_report_ths_cmd cmd = {0};
-	int ret, i, j, idx = 0;
+	int ret;
+#ifdef CONFIG_THERMAL
+	int i, j, idx = 0;
 
 	lockdep_assert_held(&mvm->mutex);
 
 	if (!mvm->tz_device.tzone)
-		return -EINVAL;
+		goto send;
 
 	/* The driver holds array of temperature trips that are unsorted
 	 * and uncompressed, the FW should get it compressed and sorted
@@ -609,6 +600,7 @@ int iwl_mvm_send_temp_report_ths_cmd(struct iwl_mvm *mvm)
 	}
 
 send:
+#endif
 	ret = iwl_mvm_send_cmd_pdu(mvm, WIDE_ID(PHY_OPS_GROUP,
 						TEMP_REPORTING_THRESHOLDS_CMD),
 				   0, sizeof(cmd), &cmd);
@@ -619,6 +611,7 @@ send:
 	return ret;
 }
 
+#ifdef CONFIG_THERMAL
 static int iwl_mvm_tzone_get_temp(struct thermal_zone_device *device,
 				  int *temperature)
 {
@@ -628,8 +621,9 @@ static int iwl_mvm_tzone_get_temp(struct thermal_zone_device *device,
 
 	mutex_lock(&mvm->mutex);
 
-	if (!mvm->ucode_loaded || !(mvm->cur_ucode == IWL_UCODE_REGULAR)) {
-		ret = -EIO;
+	if (!iwl_mvm_firmware_running(mvm) ||
+	    mvm->fwrt.cur_fw_img != IWL_UCODE_REGULAR) {
+		ret = -ENODATA;
 		goto out;
 	}
 
@@ -678,7 +672,8 @@ static int iwl_mvm_tzone_set_trip_temp(struct thermal_zone_device *device,
 
 	mutex_lock(&mvm->mutex);
 
-	if (!mvm->ucode_loaded || !(mvm->cur_ucode == IWL_UCODE_REGULAR)) {
+	if (!iwl_mvm_firmware_running(mvm) ||
+	    mvm->fwrt.cur_fw_img != IWL_UCODE_REGULAR) {
 		ret = -EIO;
 		goto out;
 	}
@@ -790,10 +785,13 @@ static int iwl_mvm_tcool_set_cur_state(struct thermal_cooling_device *cdev,
 	struct iwl_mvm *mvm = (struct iwl_mvm *)(cdev->devdata);
 	int ret;
 
-	if (!mvm->ucode_loaded || !(mvm->cur_ucode == IWL_UCODE_REGULAR))
-		return -EIO;
-
 	mutex_lock(&mvm->mutex);
+
+	if (!iwl_mvm_firmware_running(mvm) ||
+	    mvm->fwrt.cur_fw_img != IWL_UCODE_REGULAR) {
+		ret = -EIO;
+		goto unlock;
+	}
 
 	if (new_state >= ARRAY_SIZE(iwl_mvm_cdev_budgets)) {
 		ret = -EINVAL;
@@ -808,7 +806,7 @@ unlock:
 	return ret;
 }
 
-static struct thermal_cooling_device_ops tcooling_ops = {
+static const struct thermal_cooling_device_ops tcooling_ops = {
 	.get_max_state = iwl_mvm_tcool_get_max_state,
 	.get_cur_state = iwl_mvm_tcool_get_cur_state,
 	.set_cur_state = iwl_mvm_tcool_set_cur_state,
@@ -843,8 +841,10 @@ static void iwl_mvm_thermal_zone_unregister(struct iwl_mvm *mvm)
 		return;
 
 	IWL_DEBUG_TEMP(mvm, "Thermal zone device unregister\n");
-	thermal_zone_device_unregister(mvm->tz_device.tzone);
-	mvm->tz_device.tzone = NULL;
+	if (mvm->tz_device.tzone) {
+		thermal_zone_device_unregister(mvm->tz_device.tzone);
+		mvm->tz_device.tzone = NULL;
+	}
 }
 
 static void iwl_mvm_cooling_device_unregister(struct iwl_mvm *mvm)
@@ -853,8 +853,10 @@ static void iwl_mvm_cooling_device_unregister(struct iwl_mvm *mvm)
 		return;
 
 	IWL_DEBUG_TEMP(mvm, "Cooling device unregister\n");
-	thermal_cooling_device_unregister(mvm->cooling_dev.cdev);
-	mvm->cooling_dev.cdev = NULL;
+	if (mvm->cooling_dev.cdev) {
+		thermal_cooling_device_unregister(mvm->cooling_dev.cdev);
+		mvm->cooling_dev.cdev = NULL;
+	}
 }
 #endif /* CONFIG_THERMAL */
 
@@ -878,10 +880,14 @@ void iwl_mvm_thermal_initialize(struct iwl_mvm *mvm, u32 min_backoff)
 	iwl_mvm_cooling_device_register(mvm);
 	iwl_mvm_thermal_zone_register(mvm);
 #endif
+	mvm->init_status |= IWL_MVM_INIT_STATUS_THERMAL_INIT_COMPLETE;
 }
 
 void iwl_mvm_thermal_exit(struct iwl_mvm *mvm)
 {
+	if (!(mvm->init_status & IWL_MVM_INIT_STATUS_THERMAL_INIT_COMPLETE))
+		return;
+
 	cancel_delayed_work_sync(&mvm->thermal_throttle.ct_kill_exit);
 	IWL_DEBUG_TEMP(mvm, "Exit Thermal Throttling\n");
 
@@ -889,4 +895,5 @@ void iwl_mvm_thermal_exit(struct iwl_mvm *mvm)
 	iwl_mvm_cooling_device_unregister(mvm);
 	iwl_mvm_thermal_zone_unregister(mvm);
 #endif
+	mvm->init_status &= ~IWL_MVM_INIT_STATUS_THERMAL_INIT_COMPLETE;
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_VIRTIO_VSOCK_H
 #define _LINUX_VIRTIO_VSOCK_H
 
@@ -34,13 +35,14 @@ struct virtio_vsock_sock {
 
 	/* Protected by tx_lock */
 	u32 tx_cnt;
-	u32 buf_alloc;
 	u32 peer_fwd_cnt;
 	u32 peer_buf_alloc;
 
 	/* Protected by rx_lock */
 	u32 fwd_cnt;
+	u32 last_fwd_cnt;
 	u32 rx_bytes;
+	u32 buf_alloc;
 	struct list_head rx_queue;
 };
 
@@ -48,7 +50,10 @@ struct virtio_vsock_pkt {
 	struct virtio_vsock_hdr	hdr;
 	struct work_struct work;
 	struct list_head list;
+	/* socket refcnt not held, only use for cancellation */
+	struct vsock_sock *vsk;
 	void *buf;
+	u32 buf_len;
 	u32 len;
 	u32 off;
 	bool reply;
@@ -56,6 +61,7 @@ struct virtio_vsock_pkt {
 
 struct virtio_vsock_pkt_info {
 	u32 remote_cid, remote_port;
+	struct vsock_sock *vsk;
 	struct msghdr *msg;
 	u32 pkt_len;
 	u16 type;
@@ -150,5 +156,6 @@ void virtio_transport_free_pkt(struct virtio_vsock_pkt *pkt);
 void virtio_transport_inc_tx_pkt(struct virtio_vsock_sock *vvs, struct virtio_vsock_pkt *pkt);
 u32 virtio_transport_get_credit(struct virtio_vsock_sock *vvs, u32 wanted);
 void virtio_transport_put_credit(struct virtio_vsock_sock *vvs, u32 credit);
+void virtio_transport_deliver_tap_pkt(struct virtio_vsock_pkt *pkt);
 
 #endif /* _LINUX_VIRTIO_VSOCK_H */
